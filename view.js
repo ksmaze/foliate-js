@@ -218,6 +218,7 @@ export class View extends HTMLElement {
     #searchResults = new Map()
     #searchDraw
     #searchDrawOptions
+    #searchIndicatorConfig
     #cursorAutohider = new CursorAutohider(this, () =>
         this.hasAttribute('autohide-cursor'))
     isFixedLayout = false
@@ -366,7 +367,7 @@ export class View extends HTMLElement {
         })
     }
     async addAnnotation(annotation, remove) {
-        const { value } = annotation
+        const { value, overlayKey = value } = annotation
         if (value.startsWith(SEARCH_PREFIX)) {
             const cfi = value.replace(SEARCH_PREFIX, '')
             const { index, anchor } = await this.resolveNavigation(cfi)
@@ -378,7 +379,24 @@ export class View extends HTMLElement {
                     return
                 }
                 const range = doc ? anchor(doc) : anchor
-                overlayer.add(value, range, this.#searchDraw, this.#searchDrawOptions)
+                const indicatorType = annotation.indicatorType
+                    ?? this.#searchIndicatorConfig?.type
+                if (indicatorType) {
+                    const indicatorOptions = annotation.indicatorOptions
+                        ?? this.#searchIndicatorConfig?.options
+                        ?? {}
+                    const draw = indicatorType === 'arrow'
+                        ? Overlayer.arrow
+                        : Overlayer.outline
+                    overlayer.add(value, range, draw, indicatorOptions)
+                } else {
+                    overlayer.add(
+                        value,
+                        range,
+                        this.#searchDraw ?? Overlayer.outline,
+                        this.#searchDrawOptions,
+                    )
+                }
             }
             return
         }
@@ -386,10 +404,10 @@ export class View extends HTMLElement {
         const obj = this.#getOverlayer(index)
         if (obj) {
             const { overlayer, doc } = obj
-            overlayer.remove(value)
+            overlayer.remove(overlayKey)
             if (!remove) {
                 const range = doc ? anchor(doc) : anchor
-                const draw = (func, opts) => overlayer.add(value, range, func, opts)
+                const draw = (func, opts) => overlayer.add(overlayKey, range, func, opts)
                 this.#emit('draw-annotation', { draw, annotation, doc, range })
             }
         }
@@ -408,9 +426,11 @@ export class View extends HTMLElement {
         doc.addEventListener('click', e => {
             const [value, range] = overlayer.hitTest(e)
             if (value && !value.startsWith(SEARCH_PREFIX)) {
+                e.preventDefault()
+                e.stopImmediatePropagation()
                 this.#emit('show-annotation', { value, index, range })
             }
-        }, false)
+        }, true)
 
         const list = this.#searchResults.get(index)
         if (list) for (const item of list) this.addAnnotation(item)
@@ -458,6 +478,11 @@ export class View extends HTMLElement {
         }
     }
     async goTo(target) {
+        if (typeof target === 'string') {
+            try {
+                target = decodeURIComponent(target)
+            } catch {}
+        }
         const resolved = this.resolveNavigation(target)
         try {
             await this.renderer.goTo(resolved)
@@ -580,6 +605,9 @@ export class View extends HTMLElement {
         for (const list of this.#searchResults.values())
             for (const item of list) this.deleteAnnotation(item)
         this.#searchResults.clear()
+    }
+    setSearchIndicator(type = 'outline', options = {}) {
+        this.#searchIndicatorConfig = { type, options }
     }
     async initTTS(granularity = 'word', highlight) {
         const doc = this.renderer.getContents()[0].doc

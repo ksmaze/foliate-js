@@ -1,3 +1,5 @@
+import { hasActiveTextSelection, shouldAutoTurnPageForPointerSelection } from './selection.js'
+
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
 
 const debounce = (f, wait, immediate) => {
@@ -594,8 +596,19 @@ export class Paginator extends HTMLElement {
         }, 700)
         this.addEventListener('load', ({ detail: { doc } }) => {
             let isPointerSelecting = false
-            doc.addEventListener('pointerdown', () => isPointerSelecting = true)
-            doc.addEventListener('pointerup', () => isPointerSelecting = false)
+            let pointerSelectionType = null
+            doc.addEventListener('pointerdown', event => {
+                isPointerSelecting = true
+                pointerSelectionType = event.pointerType
+            })
+            doc.addEventListener('pointerup', () => {
+                isPointerSelecting = false
+                pointerSelectionType = null
+            })
+            doc.addEventListener('pointercancel', () => {
+                isPointerSelecting = false
+                pointerSelectionType = null
+            })
             let isKeyboardSelecting = false
             doc.addEventListener('keydown', () => isKeyboardSelecting = true)
             doc.addEventListener('keyup', () => isKeyboardSelecting = false)
@@ -605,7 +618,11 @@ export class Paginator extends HTMLElement {
                 if (!range) return
                 const sel = doc.getSelection()
                 if (!sel.rangeCount) return
-                if (isPointerSelecting && sel.type === 'Range')
+                if (shouldAutoTurnPageForPointerSelection({
+                    isPointerSelecting,
+                    pointerType: pointerSelectionType,
+                    selectionType: sel.type,
+                }))
                     checkPointerSelection(range, sel)
                 else if (isKeyboardSelecting) {
                     const selRange = sel.getRangeAt(0).cloneRange()
@@ -852,7 +869,8 @@ export class Paginator extends HTMLElement {
     }
     #onTouchEnd() {
         this.#touchScrolled = false
-        if (this.scrolled) return
+        if (this.scrolled || !this.#touchState
+            || hasActiveTextSelection(this.#view?.document)) return
 
         // XXX: Firefox seems to report scale as 1... sometimes...?
         // at this point I'm basically throwing `requestAnimationFrame` at
