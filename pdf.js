@@ -115,9 +115,10 @@ const makeTOCItem = item => ({
 
 export const makePDF = async file => {
     const transport = new pdfjsLib.PDFDataRangeTransport(file.size, [])
+    let destroyed = false
     transport.requestDataRange = (begin, end) => {
         file.slice(begin, end).arrayBuffer().then(chunk => {
-            transport.onDataRange(begin, chunk)
+            if (!destroyed) transport.onDataRange(begin, chunk)
         })
     }
     const pdf = await pdfjsLib.getDocument({
@@ -176,6 +177,14 @@ export const makePDF = async file => {
     }
     book.getTOCFragment = doc => doc.documentElement
     book.getCover = async () => renderPage(await pdf.getPage(1), true)
-    book.destroy = () => pdf.destroy()
+    book.destroy = () => {
+        destroyed = true
+        for (const item of cache.values()) {
+            const src = typeof item === 'string' ? item : item?.src
+            if (src) URL.revokeObjectURL(src)
+        }
+        cache.clear()
+        return pdf.destroy()
+    }
     return book
 }

@@ -259,11 +259,19 @@ export class View extends HTMLElement {
             await import('./paginator.js')
             this.renderer = document.createElement('foliate-paginator')
         }
+        const renderer = this.renderer
+        const isCurrentRenderer = () => this.renderer === renderer
         this.renderer.setAttribute('exportparts', 'head,foot,filter')
-        this.renderer.addEventListener('load', e => this.#onLoad(e.detail))
-        this.renderer.addEventListener('relocate', e => this.#onRelocate(e.detail))
-        this.renderer.addEventListener('create-overlayer', e =>
-            e.detail.attach(this.#createOverlayer(e.detail)))
+        this.renderer.addEventListener('load', e => {
+            if (isCurrentRenderer()) this.#onLoad(e.detail)
+        })
+        this.renderer.addEventListener('relocate', e => {
+            if (isCurrentRenderer()) this.#onRelocate(e.detail)
+        })
+        this.renderer.addEventListener('create-overlayer', e => {
+            if (isCurrentRenderer())
+                e.detail.attach(this.#createOverlayer(e.detail))
+        })
         this.renderer.open(book)
         this.#root.append(this.renderer)
 
@@ -296,8 +304,13 @@ export class View extends HTMLElement {
         }
     }
     close() {
-        this.renderer?.destroy()
-        this.renderer?.remove()
+        const { renderer, book } = this
+        this.renderer = null
+        this.book = null
+        renderer?.destroy()
+        renderer?.remove()
+        const destroy = book?.destroy?.()
+        destroy?.catch?.(e => console.warn(e))
         this.#sectionProgress = null
         this.#tocProgress = null
         this.#pageProgress = null
