@@ -74,6 +74,9 @@ export class FixedLayout extends HTMLElement {
         const onZoom = srcOptionIsString ? null : srcOption?.onZoom
         const element = document.createElement('div')
         element.setAttribute('dir', 'ltr')
+        Object.assign(element.style, {
+            position: 'relative',
+        })
         const iframe = document.createElement('iframe')
         element.append(iframe)
         Object.assign(iframe.style, {
@@ -93,12 +96,23 @@ export class FixedLayout extends HTMLElement {
                 const doc = iframe.contentDocument
                 this.dispatchEvent(new CustomEvent('load', { detail: { doc, index } }))
                 const { width, height } = getViewport(doc, this.defaultViewport)
-                resolve({
+                const frame = {
                     element, iframe,
                     width: parseFloat(width),
                     height: parseFloat(height),
                     onZoom,
-                })
+                    index,
+                }
+                this.dispatchEvent(new CustomEvent('create-overlayer', {
+                    detail: {
+                        doc, index,
+                        attach: overlayer => {
+                            frame.overlayer = overlayer
+                            element.append(overlayer.element)
+                        },
+                    },
+                }))
+                resolve(frame)
             }, { once: true })
             iframe.src = src
         })
@@ -152,6 +166,15 @@ export class FixedLayout extends HTMLElement {
                 flexShrink: '0',
                 marginBlock: 'auto',
             })
+            if (frame.overlayer) {
+                Object.assign(frame.overlayer.element.style, {
+                    width: `${width * iframeScale}px`,
+                    height: `${height * iframeScale}px`,
+                    transform: onZoom ? 'none' : `scale(${scale})`,
+                    transformOrigin: 'top left',
+                })
+                frame.overlayer.redraw()
+            }
             if (portrait && frame !== target) {
                 element.style.display = 'none'
             }
@@ -265,7 +288,9 @@ export class FixedLayout extends HTMLElement {
     async goToSpread(index, side, reason) {
         if (index < 0 || index > this.#spreads.length - 1) return
         if (index === this.#index) {
-            this.#render(side)
+            this.#side = side
+            this.#render()
+            this.#reportLocation(reason)
             return
         }
         this.#index = index
@@ -297,6 +322,13 @@ export class FixedLayout extends HTMLElement {
         const { index, side } = this.getSpreadOf(section)
         await this.goToSpread(index, side)
     }
+    #canGoToIndex(index) {
+        return index >= 0 && index <= this.book.sections.length - 1
+    }
+    #adjacentIndex(dir) {
+        for (let index = this.index + dir; this.#canGoToIndex(index); index += dir)
+            if (this.book.sections[index]?.linear !== 'no') return index
+    }
     async next() {
         const s = this.rtl ? this.#goLeft() : this.#goRight()
         if (!s) return this.goToSpread(this.#index + 1, this.rtl ? 'right' : 'left', 'page')
@@ -305,11 +337,28 @@ export class FixedLayout extends HTMLElement {
         const s = this.rtl ? this.#goRight() : this.#goLeft()
         if (!s) return this.goToSpread(this.#index - 1, this.rtl ? 'left' : 'right', 'page')
     }
+    prevSection() {
+        return this.goTo({ index: this.#adjacentIndex(-1) })
+    }
+    nextSection() {
+        return this.goTo({ index: this.#adjacentIndex(1) })
+    }
+    firstSection() {
+        const index = this.book.sections.findIndex(section => section.linear !== 'no')
+        return this.goTo({ index })
+    }
+    lastSection() {
+        const index = this.book.sections.findLastIndex(section => section.linear !== 'no')
+        return this.goTo({ index })
+    }
     getContents() {
-        return Array.from(this.#root.querySelectorAll('iframe'), frame => ({
-            doc: frame.contentDocument,
-            // TODO: index, overlayer
-        }))
+        return [this.#left, this.#right, this.#center]
+            .filter(frame => frame?.iframe?.contentDocument && !frame.blank)
+            .map(frame => ({
+                doc: frame.iframe.contentDocument,
+                index: frame.index,
+                overlayer: frame.overlayer,
+            }))
     }
     destroy() {
         this.#observer.unobserve(this)
