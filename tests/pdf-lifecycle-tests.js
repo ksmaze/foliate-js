@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { beforeEach, test } from 'node:test'
 
 globalThis.devicePixelRatio = 1
 globalThis.DOMMatrix = class {}
@@ -15,6 +15,11 @@ globalThis.URL.createObjectURL = () => {
     return url
 }
 globalThis.URL.revokeObjectURL = url => revokedUrls.push(url)
+
+beforeEach(() => {
+    createdUrls.length = 0
+    revokedUrls.length = 0
+})
 
 class FakeNode extends EventTarget {
     constructor(tagName = 'div') {
@@ -95,7 +100,7 @@ setPDFDocument({
     getViewport: () => ({ width: 100, height: 200 }),
 })
 
-test('pdf book destroy revokes cached page urls', async () => {
+test('pdf page sections use inline srcdoc without cached page URLs', async () => {
     setPDFDocument({
         getViewport: () => ({ width: 100, height: 200 }),
     })
@@ -105,11 +110,13 @@ test('pdf book destroy revokes cached page urls', async () => {
     })
 
     const book = await makePDF(file)
-    await book.sections[0].load()
-    assert.equal(createdUrls.length, 1)
+    const section = await book.sections[0].load()
+    assert.equal(section.src, undefined)
+    assert.match(section.srcdoc, /meta name="viewport"/)
+    assert.equal(createdUrls.length, 0)
 
     await book.destroy()
-    assert.deepEqual(revokedUrls, createdUrls)
+    assert.deepEqual(revokedUrls, [])
 })
 
 test('pdf page onZoom cancels stale render tasks', async () => {

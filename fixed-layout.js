@@ -74,6 +74,7 @@ export class FixedLayout extends HTMLElement {
     async #createFrame({ index, src: srcOption }, isCurrent = () => true) {
         const srcOptionIsString = typeof srcOption === 'string'
         const src = srcOptionIsString ? srcOption : srcOption?.src
+        const srcdoc = srcOptionIsString ? null : srcOption?.srcdoc
         const onZoom = srcOptionIsString ? null : srcOption?.onZoom
         const element = document.createElement('div')
         element.setAttribute('dir', 'ltr')
@@ -93,7 +94,7 @@ export class FixedLayout extends HTMLElement {
         iframe.setAttribute('scrolling', 'no')
         iframe.setAttribute('part', 'filter')
         this.#root.append(element)
-        if (!src) return { blank: true, element, iframe }
+        if (!src && srcdoc == null) return { blank: true, element, iframe }
         return new Promise(resolve => {
             iframe.addEventListener('load', () => {
                 const doc = iframe.contentDocument
@@ -105,6 +106,7 @@ export class FixedLayout extends HTMLElement {
                     height: parseFloat(height),
                     onZoom,
                     index,
+                    usesSrcdoc: srcdoc != null,
                 }
                 if (isCurrent()) {
                     this.dispatchEvent(new CustomEvent('create-overlayer', {
@@ -119,7 +121,8 @@ export class FixedLayout extends HTMLElement {
                 }
                 resolve(frame)
             }, { once: true })
-            iframe.src = src
+            if (srcdoc != null) iframe.srcdoc = srcdoc
+            else iframe.src = src
         })
     }
     #renderFrame(frame, scale) {
@@ -235,7 +238,10 @@ export class FixedLayout extends HTMLElement {
         frame.renderPromise = null
         frame.iframe?.contentDocument?.__pdfCancelRender?.()
         try {
-            if (frame.iframe) frame.iframe.src = 'about:blank'
+            if (frame.iframe && !frame.blank) {
+                if (frame.usesSrcdoc) frame.iframe.srcdoc = ''
+                else frame.iframe.src = 'about:blank'
+            }
         } catch {}
         frame.element?.remove?.()
     }

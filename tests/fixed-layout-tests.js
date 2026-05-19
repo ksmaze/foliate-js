@@ -68,14 +68,18 @@ class FakeHTMLElement extends FakeNode {
 }
 
 const delayedIframeLoads = new Map()
+const createdIframes = []
 
 class FakeIframe extends FakeNode {
     constructor() {
         super('iframe')
         this.contentDocument = createDocument()
+        this.srcAssignments = []
+        createdIframes.push(this)
     }
 
     set src(value) {
+        this.srcAssignments.push(value)
         this._src = value
         const delayedLoad = delayedIframeLoads.get(value)
         if (delayedLoad) {
@@ -87,6 +91,15 @@ class FakeIframe extends FakeNode {
 
     get src() {
         return this._src
+    }
+
+    set srcdoc(value) {
+        this._srcdoc = value
+        queueMicrotask(() => this.dispatchEvent(new Event('load')))
+    }
+
+    get srcdoc() {
+        return this._srcdoc
     }
 }
 
@@ -217,6 +230,55 @@ test('fixed layout waits for async page render before relocating', async () => {
     await goTo
 
     assert.deepEqual(events, ['render-start', 'render-done', 'relocate'])
+})
+
+test('fixed layout loads inline srcdoc frames without iframe URL navigation', async () => {
+    createdIframes.length = 0
+    const renderer = new FixedLayout()
+    const srcdoc = '<!DOCTYPE html><meta name="viewport" content="width=100 height=200">'
+
+    renderer.open({
+        dir: 'ltr',
+        rendition: { layout: 'pre-paginated' },
+        sections: [{
+            id: 0,
+            load: async () => ({ srcdoc, onZoom: async () => {} }),
+            size: 1000,
+        }],
+    })
+
+    await renderer.goTo({ index: 0 })
+
+    const iframe = createdIframes.at(-1)
+    assert.equal(iframe.srcdoc, srcdoc)
+    assert.deepEqual(iframe.srcAssignments, [])
+    assert.equal(renderer.getContents()[0]?.index, 0)
+})
+
+test('fixed layout clears inline srcdoc frames without about:blank URL navigation', async () => {
+    createdIframes.length = 0
+    const renderer = new FixedLayout()
+    const makeSection = index => ({
+        id: index,
+        load: async () => ({
+            srcdoc: '<!DOCTYPE html><meta name="viewport" content="width=100 height=200">',
+            onZoom: async () => {},
+        }),
+        size: 1000,
+    })
+
+    renderer.open({
+        dir: 'ltr',
+        rendition: { layout: 'pre-paginated' },
+        sections: [makeSection(0), makeSection(1)],
+    })
+
+    await renderer.goTo({ index: 0 })
+    const firstIframe = createdIframes.at(-1)
+    await renderer.goTo({ index: 1 })
+
+    assert.equal(firstIframe.srcdoc, '')
+    assert.deepEqual(createdIframes.flatMap(iframe => iframe.srcAssignments), [])
 })
 
 test('fixed layout does not rerender a PDF frame when scale is unchanged', async () => {

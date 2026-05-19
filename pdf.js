@@ -108,7 +108,7 @@ const renderPage = async (page, getImageBlob) => {
         await page.render({ canvasContext, viewport }).promise
         return new Promise(resolve => canvas.toBlob(resolve))
     }
-    const src = URL.createObjectURL(new Blob([`
+    const srcdoc = `
         <!DOCTYPE html>
         <html lang="en">
         <meta charset="utf-8">
@@ -133,9 +133,9 @@ const renderPage = async (page, getImageBlob) => {
         <div id="canvas"></div>
         <div class="textLayer"></div>
         <div class="annotationLayer"></div>
-    `], { type: 'text/html' }))
+    `
     const onZoom = ({ doc, scale }) => render(page, doc, scale)
-    return { src, onZoom }
+    return { srcdoc, onZoom }
 }
 
 const makeTOCItem = item => ({
