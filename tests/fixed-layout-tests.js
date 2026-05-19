@@ -67,6 +67,8 @@ class FakeHTMLElement extends FakeNode {
     }
 }
 
+const delayedIframeLoads = new Map()
+
 class FakeIframe extends FakeNode {
     constructor() {
         super('iframe')
@@ -75,6 +77,11 @@ class FakeIframe extends FakeNode {
 
     set src(value) {
         this._src = value
+        const delayedLoad = delayedIframeLoads.get(value)
+        if (delayedLoad) {
+            delayedLoad.then(() => this.dispatchEvent(new Event('load')))
+            return
+        }
         queueMicrotask(() => this.dispatchEvent(new Event('load')))
     }
 
@@ -127,6 +134,19 @@ const makeBook = length => ({
     })),
 })
 
+const makeAsyncRenderBook = onZoom => ({
+    dir: 'ltr',
+    rendition: { layout: 'pre-paginated' },
+    sections: [{
+        id: 0,
+        load: async () => ({
+            src: 'page-0.html',
+            onZoom,
+        }),
+        size: 1000,
+    }],
+})
+
 test('fixed layout exposes overlay-aware contents for loaded frames', async () => {
     const renderer = new FixedLayout()
     const attachedOverlayers = []
@@ -170,4 +190,171 @@ test('fixed layout section jumps move between PDF pages', async () => {
     await renderer.prevSection()
     assert.equal(renderer.index, 1)
     assert.equal(relocated.at(-1), 1)
+})
+
+test('fixed layout waits for async page render before relocating', async () => {
+    const renderer = new FixedLayout()
+    const events = []
+    let finishRender
+    const renderDone = new Promise(resolve => {
+        finishRender = resolve
+    })
+
+    renderer.addEventListener('relocate', () => {
+        events.push('relocate')
+    })
+    renderer.open(makeAsyncRenderBook(async () => {
+        events.push('render-start')
+        await renderDone
+        events.push('render-done')
+    }))
+
+    const goTo = renderer.goTo({ index: 0 })
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    assert.deepEqual(events, ['render-start'])
+    finishRender()
+    await goTo
+
+    assert.deepEqual(events, ['render-start', 'render-done', 'relocate'])
+})
+
+test('fixed layout does not rerender a PDF frame when scale is unchanged', async () => {
+    const renderer = new FixedLayout()
+    let renders = 0
+
+    renderer.open(makeAsyncRenderBook(async () => {
+        renders += 1
+    }))
+
+    await renderer.goTo({ index: 0 })
+    assert.equal(renders, 1)
+
+    renderer.attributeChangedCallback('zoom', null, 'fit-page')
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    assert.equal(renders, 1)
+})
+
+test('fixed layout suppresses stale relocate after superseded async page render', async () => {
+    const renderer = new FixedLayout()
+    const relocated = []
+    let finishFirstRender
+    const firstRenderDone = new Promise(resolve => {
+        finishFirstRender = resolve
+    })
+    const book = {
+        dir: 'ltr',
+        rendition: { layout: 'pre-paginated' },
+        sections: [
+            {
+                id: 0,
+                load: async () => ({
+                    src: 'page-0.html',
+                    onZoom: async () => firstRenderDone,
+                }),
+                size: 1000,
+            },
+            {
+                id: 1,
+                load: async () => ({
+                    src: 'page-1.html',
+                    onZoom: async () => {},
+                }),
+                size: 1000,
+            },
+        ],
+    }
+
+    renderer.addEventListener('relocate', event => {
+        relocated.push(event.detail.index)
+    })
+    renderer.open(book)
+
+    const firstNavigation = renderer.goTo({ index: 0 })
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    await renderer.goTo({ index: 1 })
+    finishFirstRender()
+    await firstNavigation
+
+    assert.deepEqual(relocated, [1])
+})
+
+test('fixed layout ignores a stale navigation whose section load resolves late', async () => {
+    const renderer = new FixedLayout()
+    const relocated = []
+    let resolveFirstLoad
+    const firstLoad = new Promise(resolve => {
+        resolveFirstLoad = resolve
+    })
+    const book = {
+        dir: 'ltr',
+        rendition: { layout: 'pre-paginated' },
+        sections: [
+            {
+                id: 0,
+                load: async () => firstLoad,
+                size: 1000,
+            },
+            {
+                id: 1,
+                load: async () => 'page-1.html',
+                size: 1000,
+            },
+        ],
+    }
+
+    renderer.addEventListener('relocate', event => {
+        relocated.push(event.detail.index)
+    })
+    renderer.open(book)
+
+    const firstNavigation = renderer.goTo({ index: 0 })
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    await renderer.goTo({ index: 1 })
+    assert.equal(renderer.getContents()[0]?.index, 1)
+
+    resolveFirstLoad('page-0.html')
+    await firstNavigation
+
+    assert.equal(renderer.getContents()[0]?.index, 1)
+    assert.deepEqual(relocated, [1])
+})
+
+test('fixed layout ignores a stale iframe load after newer navigation', async () => {
+    const renderer = new FixedLayout()
+    const relocated = []
+    const overlayIndexes = []
+    let resolveStaleFrameLoad
+    delayedIframeLoads.set('page-0.html', new Promise(resolve => {
+        resolveStaleFrameLoad = resolve
+    }))
+
+    renderer.addEventListener('relocate', event => {
+        relocated.push(event.detail.index)
+    })
+    renderer.addEventListener('create-overlayer', event => {
+        overlayIndexes.push(event.detail.index)
+        event.detail.attach({
+            element: new FakeNode('svg'),
+            redraw() {},
+        })
+    })
+    renderer.open(makeBook(2))
+
+    const firstNavigation = renderer.goTo({ index: 0 })
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    await renderer.goTo({ index: 1 })
+    assert.equal(renderer.getContents()[0]?.index, 1)
+
+    resolveStaleFrameLoad()
+    await firstNavigation
+    delayedIframeLoads.clear()
+
+    assert.equal(renderer.getContents()[0]?.index, 1)
+    assert.deepEqual(overlayIndexes, [1])
+    assert.deepEqual(relocated, [1])
 })

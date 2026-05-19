@@ -32,9 +32,12 @@ const getViewport = (doc, viewport) => {
 export class FixedLayout extends HTMLElement {
     static observedAttributes = ['zoom']
     #root = this.attachShadow({ mode: 'closed' })
-    #observer = new ResizeObserver(() => this.#render())
+    #observer = new ResizeObserver(() => {
+        this.#render().catch(e => console.warn(e))
+    })
     #spreads
     #index = -1
+    #navigationGeneration = 0
     defaultViewport
     spread
     #portrait = false
@@ -64,11 +67,11 @@ export class FixedLayout extends HTMLElement {
             case 'zoom':
                 this.#zoom = value !== 'fit-width' && value !== 'fit-page'
                     ? parseFloat(value) : value
-                this.#render()
+                this.#render().catch(e => console.warn(e))
                 break
         }
     }
-    async #createFrame({ index, src: srcOption }) {
+    async #createFrame({ index, src: srcOption }, isCurrent = () => true) {
         const srcOptionIsString = typeof srcOption === 'string'
         const src = srcOptionIsString ? srcOption : srcOption?.src
         const onZoom = srcOptionIsString ? null : srcOption?.onZoom
@@ -103,21 +106,55 @@ export class FixedLayout extends HTMLElement {
                     onZoom,
                     index,
                 }
-                this.dispatchEvent(new CustomEvent('create-overlayer', {
-                    detail: {
-                        doc, index,
-                        attach: overlayer => {
-                            frame.overlayer = overlayer
-                            element.append(overlayer.element)
+                if (isCurrent()) {
+                    this.dispatchEvent(new CustomEvent('create-overlayer', {
+                        detail: {
+                            doc, index,
+                            attach: overlayer => {
+                                frame.overlayer = overlayer
+                                element.append(overlayer.element)
+                            },
                         },
-                    },
-                }))
+                    }))
+                }
                 resolve(frame)
             }, { once: true })
             iframe.src = src
         })
     }
-    #render(side = this.#side) {
+    #renderFrame(frame, scale) {
+        const { onZoom, iframe, blank } = frame
+        if (!onZoom || blank || !iframe?.contentDocument) return null
+        if (frame.renderedScale === scale) return null
+        if (frame.renderScale === scale && frame.renderPromise)
+            return frame.renderPromise
+
+        const version = (frame.renderVersion ?? 0) + 1
+        const doc = iframe.contentDocument
+        frame.renderVersion = version
+        frame.renderScale = scale
+        const renderPromise = Promise.resolve()
+            .then(() => {
+                if (frame.renderVersion !== version || iframe.contentDocument !== doc)
+                    return
+                return onZoom({ doc, scale })
+            })
+            .then(() => {
+                if (frame.renderVersion === version && iframe.contentDocument === doc)
+                    frame.renderedScale = scale
+            })
+            .catch(e => {
+                if (frame.renderVersion === version)
+                    console.warn(e)
+            })
+            .finally(() => {
+                if (frame.renderVersion === version)
+                    frame.renderPromise = null
+            })
+        frame.renderPromise = renderPromise
+        return renderPromise
+    }
+    async #render(side = this.#side) {
         if (!side) return
         const left = this.#left ?? {}
         const right = this.#center ?? this.#right ?? {}
@@ -146,10 +183,11 @@ export class FixedLayout extends HTMLElement {
                             right.height ?? blankHeight)))
             ) || 1
 
+        const renderPromises = []
+        const transformedFrames = []
         const transform = frame => {
             let { element, iframe, width, height, blank, onZoom } = frame
             if (!iframe) return
-            if (onZoom) onZoom({ doc: frame.iframe.contentDocument, scale })
             const iframeScale = onZoom ? scale : 1
             Object.assign(iframe.style, {
                 width: `${width * iframeScale}px`,
@@ -173,8 +211,10 @@ export class FixedLayout extends HTMLElement {
                     transform: onZoom ? 'none' : `scale(${scale})`,
                     transformOrigin: 'top left',
                 })
-                frame.overlayer.redraw()
+                transformedFrames.push(frame)
             }
+            const renderPromise = this.#renderFrame(frame, scale)
+            if (renderPromise) renderPromises.push(renderPromise)
             if (portrait && frame !== target) {
                 element.style.display = 'none'
             }
@@ -185,38 +225,81 @@ export class FixedLayout extends HTMLElement {
             transform(left)
             transform(right)
         }
+        await Promise.all(renderPromises)
+        for (const frame of transformedFrames)
+            frame.overlayer?.redraw()
     }
-    async #showSpread({ left, right, center, side }) {
+    #destroyFrame(frame) {
+        if (!frame) return
+        frame.renderVersion = (frame.renderVersion ?? 0) + 1
+        frame.renderPromise = null
+        frame.iframe?.contentDocument?.__pdfCancelRender?.()
+        try {
+            if (frame.iframe) frame.iframe.src = 'about:blank'
+        } catch {}
+        frame.element?.remove?.()
+    }
+    #isNavigationCurrent(generation) {
+        return generation === this.#navigationGeneration
+    }
+    async #showSpread({ left, right, center, side }, isCurrent = () => true) {
+        if (!isCurrent()) return false
+        this.#destroyFrame(this.#left)
+        this.#destroyFrame(this.#right)
+        this.#destroyFrame(this.#center)
         this.#root.replaceChildren()
         this.#left = null
         this.#right = null
         this.#center = null
         if (center) {
-            this.#center = await this.#createFrame(center)
+            const frame = await this.#createFrame(center, isCurrent)
+            if (!isCurrent()) {
+                this.#destroyFrame(frame)
+                return false
+            }
+            this.#center = frame
             this.#side = 'center'
-            this.#render()
+            await this.#render()
+            if (!isCurrent()) return false
         } else {
-            this.#left = await this.#createFrame(left)
-            this.#right = await this.#createFrame(right)
+            const leftFrame = await this.#createFrame(left, isCurrent)
+            if (!isCurrent()) {
+                this.#destroyFrame(leftFrame)
+                return false
+            }
+            const rightFrame = await this.#createFrame(right, isCurrent)
+            if (!isCurrent()) {
+                this.#destroyFrame(leftFrame)
+                this.#destroyFrame(rightFrame)
+                return false
+            }
+            this.#left = leftFrame
+            this.#right = rightFrame
             this.#side = this.#left.blank ? 'right'
                 : this.#right.blank ? 'left' : side
-            this.#render()
+            await this.#render()
+            if (!isCurrent()) return false
         }
+        return true
     }
-    #goLeft() {
+    async #goLeft() {
         if (this.#center || this.#left?.blank) return
         if (this.#portrait && this.#left?.element?.style?.display === 'none') {
+            const generation = ++this.#navigationGeneration
             this.#side = 'left'
-            this.#render()
+            await this.#render()
+            if (!this.#isNavigationCurrent(generation)) return
             this.#reportLocation('page')
             return true
         }
     }
-    #goRight() {
+    async #goRight() {
         if (this.#center || this.#right?.blank) return
         if (this.#portrait && this.#right?.element?.style?.display === 'none') {
+            const generation = ++this.#navigationGeneration
             this.#side = 'right'
-            this.#render()
+            await this.#render()
+            if (!this.#isNavigationCurrent(generation)) return
             this.#reportLocation('page')
             return true
         }
@@ -287,27 +370,35 @@ export class FixedLayout extends HTMLElement {
     }
     async goToSpread(index, side, reason) {
         if (index < 0 || index > this.#spreads.length - 1) return
+        const generation = ++this.#navigationGeneration
+        const isCurrent = () => this.#isNavigationCurrent(generation)
         if (index === this.#index) {
             this.#side = side
-            this.#render()
+            await this.#render()
+            if (!isCurrent()) return
             this.#reportLocation(reason)
             return
         }
-        this.#index = index
         const spread = this.#spreads[index]
+        let didShow = false
         if (spread.center) {
             const index = this.book.sections.indexOf(spread.center)
             const src = await spread.center?.load?.()
-            await this.#showSpread({ center: { index, src } })
+            if (!isCurrent()) return
+            didShow = await this.#showSpread({ center: { index, src } }, isCurrent)
         } else {
             const indexL = this.book.sections.indexOf(spread.left)
             const indexR = this.book.sections.indexOf(spread.right)
             const srcL = await spread.left?.load?.()
+            if (!isCurrent()) return
             const srcR = await spread.right?.load?.()
+            if (!isCurrent()) return
             const left = { index: indexL, src: srcL }
             const right = { index: indexR, src: srcR }
-            await this.#showSpread({ left, right, side })
+            didShow = await this.#showSpread({ left, right, side }, isCurrent)
         }
+        if (!didShow || !isCurrent()) return
+        this.#index = index
         this.#reportLocation(reason)
     }
     async select(target) {
@@ -330,11 +421,11 @@ export class FixedLayout extends HTMLElement {
             if (this.book.sections[index]?.linear !== 'no') return index
     }
     async next() {
-        const s = this.rtl ? this.#goLeft() : this.#goRight()
+        const s = await (this.rtl ? this.#goLeft() : this.#goRight())
         if (!s) return this.goToSpread(this.#index + 1, this.rtl ? 'right' : 'left', 'page')
     }
     async prev() {
-        const s = this.rtl ? this.#goRight() : this.#goLeft()
+        const s = await (this.rtl ? this.#goRight() : this.#goLeft())
         if (!s) return this.goToSpread(this.#index - 1, this.rtl ? 'left' : 'right', 'page')
     }
     prevSection() {
@@ -361,6 +452,9 @@ export class FixedLayout extends HTMLElement {
             }))
     }
     destroy() {
+        this.#destroyFrame(this.#left)
+        this.#destroyFrame(this.#right)
+        this.#destroyFrame(this.#center)
         this.#observer.unobserve(this)
     }
 }

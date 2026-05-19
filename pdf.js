@@ -14,57 +14,88 @@ const textLayerBuilderCSS = await fetchText(pdfjsPath('text_layer_builder.css'))
 const annotationLayerBuilderCSS = await fetchText(pdfjsPath('annotation_layer_builder.css'))
 
 const render = async (page, doc, zoom) => {
-    const scale = zoom * devicePixelRatio
-    doc.documentElement.style.transform = `scale(${1 / devicePixelRatio})`
-    doc.documentElement.style.transformOrigin = 'top left'
-    doc.documentElement.style.setProperty('--scale-factor', scale)
-    const viewport = page.getViewport({ scale })
+    doc.__pdfCancelRender?.()
+    const token = Symbol('pdf-render')
+    doc.__pdfRenderToken = token
+    const isCurrent = () => doc.__pdfRenderToken === token
+    let renderTask
+    try {
+        const scale = zoom * devicePixelRatio
+        doc.documentElement.style.transform = `scale(${1 / devicePixelRatio})`
+        doc.documentElement.style.transformOrigin = 'top left'
+        doc.documentElement.style.setProperty('--scale-factor', scale)
+        const viewport = page.getViewport({ scale })
 
-    // the canvas must be in the `PDFDocument`'s `ownerDocument`
-    // (`globalThis.document` by default); that's where the fonts are loaded
-    const canvas = document.createElement('canvas')
-    canvas.height = viewport.height
-    canvas.width = viewport.width
-    const canvasContext = canvas.getContext('2d')
-    await page.render({ canvasContext, viewport }).promise
-    doc.querySelector('#canvas').replaceChildren(doc.adoptNode(canvas))
+        // the canvas must be in the `PDFDocument`'s `ownerDocument`
+        // (`globalThis.document` by default); that's where the fonts are loaded
+        const canvas = document.createElement('canvas')
+        canvas.height = viewport.height
+        canvas.width = viewport.width
+        const canvasContext = canvas.getContext('2d')
+        renderTask = page.render({ canvasContext, viewport })
+        doc.__pdfCancelRender = () => {
+            doc.__pdfRenderToken = null
+            try {
+                renderTask?.cancel?.()
+            } catch {}
+        }
+        try {
+            await renderTask.promise
+        } catch (e) {
+            if (e?.name === 'RenderingCancelledException') return
+            throw e
+        }
+        if (!isCurrent()) return
+        doc.querySelector('#canvas').replaceChildren(doc.adoptNode(canvas))
 
-    const container = doc.querySelector('.textLayer')
-    const textLayer = new pdfjsLib.TextLayer({
-        textContentSource: await page.streamTextContent(),
-        container, viewport,
-    })
-    await textLayer.render()
-
-    // hide "offscreen" canvases appended to docuemnt when rendering text layer
-    // https://github.com/mozilla/pdf.js/blob/642b9a5ae67ef642b9a8808fd9efd447e8c350e2/web/pdf_viewer.css#L51-L58
-    for (const canvas of document.querySelectorAll('.hiddenCanvasElement'))
-        Object.assign(canvas.style, {
-            position: 'absolute',
-            top: '0',
-            left: '0',
-            width: '0',
-            height: '0',
-            display: 'none',
+        const container = doc.querySelector('.textLayer')
+        const textContentSource = await page.streamTextContent()
+        if (!isCurrent()) return
+        const textLayer = new pdfjsLib.TextLayer({
+            textContentSource,
+            container, viewport,
         })
+        await textLayer.render()
+        if (!isCurrent()) return
 
-    // fix text selection
-    // https://github.com/mozilla/pdf.js/blob/642b9a5ae67ef642b9a8808fd9efd447e8c350e2/web/text_layer_builder.js#L105-L107
-    const endOfContent = document.createElement('div')
-    endOfContent.className = 'endOfContent'
-    container.append(endOfContent)
-    // TODO: this only works in Firefox; see https://github.com/mozilla/pdf.js/pull/17923
-    container.onpointerdown = () => container.classList.add('selecting')
-    container.onpointerup = () => container.classList.remove('selecting')
+        // hide "offscreen" canvases appended to docuemnt when rendering text layer
+        // https://github.com/mozilla/pdf.js/blob/642b9a5ae67ef642b9a8808fd9efd447e8c350e2/web/pdf_viewer.css#L51-L58
+        for (const canvas of document.querySelectorAll('.hiddenCanvasElement'))
+            Object.assign(canvas.style, {
+                position: 'absolute',
+                top: '0',
+                left: '0',
+                width: '0',
+                height: '0',
+                display: 'none',
+            })
 
-    const div = doc.querySelector('.annotationLayer')
-    const linkService = {
-        goToDestination: () => {},
-        getDestinationHash: dest => JSON.stringify(dest),
-        addLinkAttributes: (link, url) => link.href = url,
+        // fix text selection
+        // https://github.com/mozilla/pdf.js/blob/642b9a5ae67ef642b9a8808fd9efd447e8c350e2/web/text_layer_builder.js#L105-L107
+        const endOfContent = document.createElement('div')
+        endOfContent.className = 'endOfContent'
+        container.append(endOfContent)
+        // TODO: this only works in Firefox; see https://github.com/mozilla/pdf.js/pull/17923
+        container.onpointerdown = () => container.classList.add('selecting')
+        container.onpointerup = () => container.classList.remove('selecting')
+
+        const div = doc.querySelector('.annotationLayer')
+        const linkService = {
+            goToDestination: () => {},
+            getDestinationHash: dest => JSON.stringify(dest),
+            addLinkAttributes: (link, url) => link.href = url,
+        }
+        const annotations = await page.getAnnotations()
+        if (!isCurrent()) return
+        await new pdfjsLib.AnnotationLayer({ page, viewport, div, linkService })
+            .render({ annotations })
+    } finally {
+        if (isCurrent()) {
+            doc.__pdfRenderToken = null
+            doc.__pdfCancelRender = null
+        }
+        page.cleanup?.()
     }
-    await new pdfjsLib.AnnotationLayer({ page, viewport, div, linkService })
-        .render({ annotations: await page.getAnnotations() })
 }
 
 const renderPage = async (page, getImageBlob) => {
